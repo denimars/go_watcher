@@ -9,6 +9,7 @@ A small hot-reload tool for Go projects, written in Rust. It watches the current
 - Debounces rapid changes (500 ms) to avoid multiple restarts on a single save
 - Auto-detects the entry point, or accepts one as an argument
 - Detects the app's port and frees it if another process is already listening
+- Shuts down cleanly on Ctrl+C: stops the app, releases the port, then exits
 - Ignores changes inside `.git`, `vendor`, and `target`
 - Works on Unix (macOS/Linux) and Windows
 
@@ -69,11 +70,18 @@ If a process is already listening on that port, it is killed (`kill -9` on Unix,
 
 > **Warning:** this kills whatever process is listening on the detected port, not just previous runs of your app.
 
+### Stopping
+
+Press **Ctrl+C** in the terminal running go_watcher (on macOS too — `Cmd+C` is copy, the terminal's interrupt key is `Ctrl+C`). go_watcher kills the `go run` process group, frees the detected port, and exits.
+
+The same cleanup runs on `SIGTERM`/`SIGHUP` (Unix) and when the console window is closed (Windows).
+
 ## How it works
 
 1. Starts `go run <entry>` in its own process group
 2. Watches `.` recursively using [`notify`](https://crates.io/crates/notify)
 3. On a relevant `.go` change, kills the process group, frees the port, and starts `go run` again
+4. On Ctrl+C (or another termination signal), kills the process group, frees the port, and exits
 
 ## Development
 

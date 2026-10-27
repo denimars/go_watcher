@@ -2,10 +2,17 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+
+/// The `go run` child together with the port it was started on.
+struct Running {
+    child: Child,
+    port: Option<u16>,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting Go Watcher...");
@@ -13,7 +20,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let entry = resolve_entry();
     println!("🎯 Entry point: {entry}");
-    let mut go_process = start_go_process(&entry);
+
+    let running: Arc<Mutex<Option<Running>>> = Arc::new(Mutex::new(Some(start_go_process(&entry))));
+
+    // Ctrl+C (SIGINT), SIGTERM/SIGHUP on unix, console close on Windows:
+    // stop the app, release the port, then exit.
+    {
+        let running = Arc::clone(&running);
+        ctrlc::set_handler(move || {
+            println!("\n🛑 Stopping Go Watcher...");
+            shutdown(&running);
+            std::process::exit(0);
+        })?;
+    }
 
     let (tx, rx) = channel();
 
@@ -32,15 +51,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("\n🔄 .go file changed! restarting....");
 
-                kill_process_group(&mut go_process);
+                let mut guard = running.lock().unwrap();
+                if let Some(mut old) = guard.take() {
+                    kill_process_group(&mut old.child);
+                }
+                *guard = Some(start_go_process(&entry));
+                drop(guard);
 
-                go_process = start_go_process(&entry);
                 last_reload = Instant::now();
             }
         }
     }
 
+    shutdown(&running);
+
     Ok(())
+}
+
+/// Kill the running app and make sure its port is free again.
+fn shutdown(running: &Mutex<Option<Running>>) {
+    let taken = running.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(mut run) = taken {
+        kill_process_group(&mut run.child);
+        if let Some(port) = run.port {
+            free_port(port);
+        }
+        println!("✅ Port released, app stopped.");
+    }
 }
 
 /// Resolve the `go run` target: CLI argument, or auto-detect
@@ -150,8 +187,9 @@ fn free_port(port: u16) {
     }
 }
 
-fn start_go_process(entry: &str) -> Child {
-    match detect_port(entry) {
+fn start_go_process(entry: &str) -> Running {
+    let port = detect_port(entry);
+    match port {
         Some(port) => {
             println!("🔌 Detected port: {port}");
             free_port(port);
@@ -170,7 +208,8 @@ fn start_go_process(entry: &str) -> Child {
         });
     }
 
-    cmd.spawn().unwrap_or_else(|_| panic!("Failed to run `go run {entry}`"))
+    let child = cmd.spawn().unwrap_or_else(|_| panic!("Failed to run `go run {entry}`"));
+    Running { child, port }
 }
 
 fn kill_process_group(child: &mut Child) {
